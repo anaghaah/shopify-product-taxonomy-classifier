@@ -1,99 +1,60 @@
-import sqlite3
 import json
 import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-DB_NAME = "products.db"
-
-def init_db():
-    """Initializes the database schema for product categorization tracking."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        external_id TEXT,
-        title TEXT,
-        description TEXT,
-        brand TEXT,
-        image_url TEXT,
-        predicted_category TEXT,
-        confidence_score REAL,
-        alt_category_1 TEXT,
-        alt_category_2 TEXT,
-        attributes TEXT,
-        status TEXT DEFAULT 'PENDING',
-        manual_review INTEGER DEFAULT 0,
-        approved INTEGER DEFAULT 0
-    )
-    """)
-    conn.commit()
-    conn.close()
-
-class TaxonomyClassifier:
-    def __init__(self, taxonomy_path="taxonomy.json"):
-        with open(taxonomy_path, "r", encoding="utf-8") as f:
+class TaxonomyEngine:
+    def __init__(self, taxonomy_file="taxonomy.json"):
+        with open(taxonomy_file, "r", encoding="utf-8") as f:
             self.categories = json.load(f)
         
-        self.vectorizer = TfidfVectorizer(stop_words='english', max_features=20000)
-        self.taxonomy_matrix = self.vectorizer.fit_transform(self.categories)
+        self.vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english")
+        self.category_vectors = self.vectorizer.fit_transform(self.categories)
 
-    def extract_attributes(self, text):
-        """
-        Extracts comprehensive e-commerce attributes:
-        Colors, Sizes, Dimensions, and Materials.
-        """
-        attrs = {}
-        lower_text = text.lower()
+    def classify(self, text, threshold=0.35):
+        if not text.strip():
+            return "Uncategorized", 0.0, ["General Merchandise"], 1
 
-        # 1. Colors
-        colors = [
-            'red', 'blue', 'green', 'black', 'white', 'yellow', 'grey', 'gray',
-            'pink', 'brown', 'navy', 'gold', 'silver', 'beige', 'charcoal', 'walnut'
-        ]
-        for c in colors:
-            if re.search(rf"\b{c}\b", lower_text):
-                attrs['color'] = c.capitalize()
-                break
-
-        # 2. Materials
-        materials = [
-            'leather', 'velvet', 'wood', 'teak', 'marble', 'steel', 
-            'stainless steel', 'fabric', 'metal', 'glass', 'cotton', 'mesh'
-        ]
-        for m in materials:
-            if re.search(rf"\b{m}\b", lower_text):
-                attrs['material'] = m.title()
-                break
-
-        # 3. Sizes (Standard apparel sizes)
-        sizes = ['xs', 's', 'm', 'l', 'xl', 'xxl', 'small', 'medium', 'large']
-        for s in sizes:
-            if re.search(rf"\b{s}\b", lower_text):
-                attrs['size'] = s.upper()
-                break
-
-        # 4. Dimensions / Furniture sizes (e.g., 48", 54", 60", 72-inch)
-        dimension_match = re.search(r'(\d+)\s*(?:\"|\s*inch|\s*in\b)', lower_text)
-        if dimension_match:
-            attrs['dimension'] = f"{dimension_match.group(1)}\""
-
-        return attrs
-
-    def classify(self, title, description="", brand=""):
-        combined_text = f"{title or ''} {description or ''} {brand or ''}".strip()
-        if not combined_text:
-            return "Uncategorized", 0.0, [], {}
-
-        query_vec = self.vectorizer.transform([combined_text])
-        sim_scores = cosine_similarity(query_vec, self.taxonomy_matrix).flatten()
+        query_vec = self.vectorizer.transform([text])
+        similarities = cosine_similarity(query_vec, self.category_vectors).flatten()
         
-        top_indices = sim_scores.argsort()[-3:][::-1]
-        top_scores = [float(sim_scores[i]) for i in top_indices]
-        top_categories = [self.categories[i] for i in top_indices]
-
-        confidence = round(top_scores[0] * 100, 2)
-        attributes = self.extract_attributes(combined_text)
+        top_indices = similarities.argsort()[::-1][:3]
+        best_category = self.categories[top_indices[0]]
+        best_score = float(similarities[top_indices[0]])
         
-        return top_categories[0], confidence, top_categories[1:], attributes
+        alternatives = [self.categories[i] for i in top_indices[1:3]]
+        needs_review = 1 if best_score < threshold else 0
+        
+        return best_category, round(best_score, 4), alternatives, needs_review
+
+    def extract_attributes(self, row):
+        text = f"{row.get('Product Name', '')} {row.get('Product Description', '')} {row.get('Product Category', '')}"
+        
+        # Color
+        color = str(row.get("Product Color", "")).strip()
+        if not color or color.lower() == "nan":
+            found_color = re.findall(r"\b(White|Black|Blue|Gray|Brown|Red|Green|Gold|Silver|Beige)\b", text, re.I)
+            color = found_color[0].capitalize() if found_color else "Unspecified"
+
+        # Material
+        material = str(row.get("Materials", "")).strip()
+        if not material or material.lower() == "nan":
+            found_mat = re.findall(r"\b(Leather|Fabric|Wood|Metal|Steel|Glass|Plastic|Velvet|Chrome)\b", text, re.I)
+            material = found_mat[0].capitalize() if found_mat else "Unspecified"
+
+        # Dimensions & Weight
+        dimensions = str(row.get("Product Dimensions", "")).strip()
+        if not dimensions or dimensions.lower() == "nan":
+            dim_match = re.search(r"\d+(\.\d+)?\s*[\"xX×lLwWhH]+\s*\d+(\.\d+)?", text)
+            dimensions = dim_match.group(0) if dim_match else "N/A"
+
+        weight = str(row.get("Product Weight", "")).strip()
+        if not weight or weight.lower() == "nan":
+            weight = "N/A"
+
+        return {
+            "color": color,
+            "material": material,
+            "dimensions": dimensions,
+            "weight": weight
+        }
