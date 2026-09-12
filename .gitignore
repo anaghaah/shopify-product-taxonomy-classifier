@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+products.db
+Product List.zip
+.DS_Store
